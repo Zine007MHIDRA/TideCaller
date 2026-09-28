@@ -237,13 +237,18 @@ class Macro:
         deadline = start + s.timeout_s
         skip = self.skips_shake()
         nav_on = False
+        seen = 0  # consecutive frames with a bar: one stray frame (glow, particles) must not start the reel
         while self.clock() < deadline:
             self._checkpoint()
             bar, _ = self._grab(self.cfg.regions.fish_bar)
-            if bar is not None and tracker.track(bar) is not None:
+            seen = seen + 1 if bar is not None and tracker.track(bar) is not None else 0
+            if seen >= 3:
                 if nav_on:
                     self.inp.tap(s.navigation_key)
                 return Phase.REEL
+            if seen:
+                self._sleep(0.01)
+                continue
             if skip or self.clock() - start < s.instant_grace_s:
                 self._sleep(0.03)  # only watch for the reel; never click
                 continue

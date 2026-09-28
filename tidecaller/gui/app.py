@@ -62,9 +62,10 @@ def annotate(img: np.ndarray, r: TrackResult | None, hold: bool) -> np.ndarray:
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config, cfg_path: Path, macro_factory: Callable[[], Macro],
                  overlay_factory: Callable[[Callable[[], None]], QWidget | None] | None = None,
-                 notifier_factory=None) -> None:
+                 notifier_factory=None, reel_grabber: Callable[[], np.ndarray | None] | None = None) -> None:
         super().__init__()
         self.cfg, self.cfg_path = cfg, cfg_path
+        self.reel_grabber = reel_grabber
         self.macro_factory, self.overlay_factory, self.notifier_factory = macro_factory, overlay_factory, notifier_factory
         self.macro: Macro | None = None
         self.thread: threading.Thread | None = None
@@ -149,6 +150,10 @@ class MainWindow(QMainWindow):
         row.addWidget(QLabel("Rod profile"))
         row.addWidget(self.rod_box, 1)
         row.addWidget(new_btn)
+        cal_btn = QPushButton("Calibrate reel...")
+        cal_btn.setToolTip("Learn a bar skin's colors: capture or load a reel, click the bar and the fish")
+        cal_btn.clicked.connect(self._calibrate_reel)
+        row.addWidget(cal_btn)
         v.addLayout(row)
         self.rod_form_holder = QVBoxLayout()
         v.addLayout(self.rod_form_holder)
@@ -188,6 +193,23 @@ class MainWindow(QMainWindow):
         self.cfg.rods[n] = self.cfg.rod().model_copy(update={"name": n})
         self.rod_box.addItem(n)
         self.rod_box.setCurrentText(n)
+
+    def _calibrate_reel(self) -> None:
+        from tidecaller.gui.calibrate_dialog import CalibrateDialog
+
+        def hide_windows(hidden: bool) -> None:
+            (self.hide if hidden else self.show)()
+            dlg.setWindowOpacity(0.0 if hidden else 1.0)
+
+        dlg = CalibrateDialog(self.cfg.rod(), self.cfg.regions.fish_bar, self.reel_grabber, hide_windows, self)
+        if dlg.exec() and dlg.learned_profile() is not None:
+            name = self.cfg.fish.rod
+            self.cfg.rods[name] = dlg.learned_profile().model_copy(update={"name": name})
+            self.cfg.fish.track = "color"
+            self._save()
+            self._render_rod_form()
+            QMessageBox.information(self, "Calibrate reel",
+                                    f"Saved to '{name}'. Tracking switched to 'color' (Fish tab).")
 
     def _discord_tab(self) -> QWidget:
         w = QWidget()

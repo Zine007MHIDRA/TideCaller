@@ -10,10 +10,11 @@ reading, no injection, and no executor. It's a real-time CV + control-loop proje
 ## Features
 | Tab | What it does |
 |---|---|
-| **Main** | DXcam (fast) or MSS (for screen-sharing and laptops) capture, auto-select rod, pause when Roblox loses focus, rebindable hotkeys |
-| **Cast** | Normal / Perfect casting. Release styles: idiot-proof, threshold, timed, predictive (latency-compensated) |
-| **Shake** | Circle detection (HSV mask + contour circularity), fast pixel mode, or UI-navigation mode |
+| **Main** | DXcam (fast) or MSS (for screen-sharing and laptops) capture, auto-select rod (reads the rod's Power bar, never toggles a held rod away), pause when Roblox loses focus, rebindable hotkeys |
+| **Cast** | Releases the moment the power meter turns green (perfect cast). Release styles: idiot-proof, threshold, timed, predictive (learned time-to-full) |
+| **Shake** | Circle detection (HSV mask + contour circularity), fast pixel mode, UI-navigation mode, or none. Rods with lure ≥ 95% (e.g. Masterline) skip the shake automatically |
 | **Fish** | Line / Color / YOLO trackers, PD reel controller with sigma-delta mouse modulation, bag spam, scan FPS |
+| **Calibrate reel** | Two clicks teach the tracker a cosmetic bar skin: capture a reel (or load a recording), click the catch bar, click the fish |
 | **Rod presets** | Reel presets for all 263 rods, generated from their Control and Resilience stats |
 | **Totem** | Cycle- or timer-based totems, auto potions |
 | **Discord** | Webhook with test button, catch pings, "stuck" alerts, and periodic summaries with a screenshot |
@@ -43,15 +44,21 @@ py -3.13 -m venv .venv
 .venv\Scripts\python -m tidecaller                  # live
 .venv\Scripts\python -m tidecaller --replay run.mp4 # dry run on a recording
 ```
-Before the first live run: open Fisch, cast once, press **F1**, and fit the boxes over the fish bar, cast meter,
-shake area and hotbar.
+Before the first live run: open Fisch, cast once, press **F1**, and check the boxes sit on the fish bar's inner rows,
+the cast meter area, the shake area, the hotbar and the rod's Power bar (defaults are measured on a real 1080p window).
+
+Using a reel **bar skin**? Fish tab → pick your rod → **Calibrate reel...** → capture while reeling (or load a
+recording) → click the catch bar, then the fish → check the preview → Apply. On a pastel skin with a decoration
+pinned to the bar, this found the bar in 106/106 frames of a real reel where the default tracker found 0.
 
 ## Tests
 ```bash
 .venv\Scripts\python -m pytest -q
 ```
-The unit tests cover trackers (±3 px), the meter reader, release strategies, shake detection, the controller and
-rod presets. The end-to-end tests run the real loop against the simulator and check that it catches fish.
+The unit tests cover trackers (±3 px), release strategies, shake detection, the controller and rod presets.
+Crops from real gameplay (`tests/fixtures/`) pin the cast-meter, rod-held and reel-calibration detectors to the real
+UI. The end-to-end tests run the real loop against the simulator, including regressions for rod toggling and
+instant-bite rods.
 
 ## YOLO tracker (hard rods)
 ```bash

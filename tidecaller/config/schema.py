@@ -59,8 +59,8 @@ class Hotkeys(BaseModel):
 class Regions(BaseModel):
     """Stored as fractions of the Roblox client rect, so they survive resolution changes."""
     # defaults measured on a real 1920x1040 Fisch window
-    fish_bar: Region = Region(0.29, 0.862, 0.42, 0.032)
-    reel_progress: Region = Region(0.30, 0.927, 0.40, 0.014)
+    fish_bar: Region = Region(0.29, 0.839, 0.42, 0.025)   # inner rows of the reel box, between its borders
+    reel_progress: Region = Region(0.30, 0.902, 0.40, 0.009)
     shake: Region = Region(0.2, 0.15, 0.6, 0.6)
     # the meter sits right of the character; searched for, so this box can be generous
     cast_meter: Region = Region(0.45, 0.25, 0.25, 0.5)
@@ -117,6 +117,13 @@ class RodProfile(BaseModel):
     # grayscale thresholds for line tracking
     line_bar_min: int = 200
     line_fish_max: int = 50
+    # shape rules (fractions of the fish-bar box width); "Calibrate reel" fills these in for bar skins
+    bar_gap_frac: float = 0.04       # bridge holes in the bar (fish icon, skin decorations)
+    bar_min_frac: float = 0.0        # a white run narrower than this is not the catch bar
+    fish_max_width_frac: float = 0.12
+    fish_col_share: float = 0.3      # share of a column's pixels that must match the fish color
+    bar_col_share: float = 0.4       # same for the bar; calibration raises it so diagonal objects (rod swing) fail
+    calibrated: bool = False
 
 
 class FishSettings(BaseModel):
@@ -150,7 +157,7 @@ class DiscordSettings(BaseModel):
     attach_screenshot: bool = True
 
 
-CONFIG_VERSION = 2  # v2: region defaults re-measured on the real game UI
+CONFIG_VERSION = 3  # v2: regions measured on the real UI; v3: reel box moved onto the bar's inner rows
 
 
 class Config(BaseModel):
@@ -176,8 +183,8 @@ class Config(BaseModel):
     def load(cls, path: Path) -> "Config":
         if path.exists():
             data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("version", 1) < 2:
-                data.pop("regions", None)  # v1 boxes were guesses; use the measured defaults
+            if data.get("version", 1) < 3:
+                data.pop("regions", None)  # older boxes were off; use the measured defaults
             data["version"] = CONFIG_VERSION
             cfg = cls.model_validate(data)
             cfg.save(path)

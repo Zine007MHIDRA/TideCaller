@@ -73,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
                          notifier=notifier_factory())
 
         overlay_factory = None
+
+        def reel_grabber():
+            r = cfg.regions.fish_bar.to_rect(sim.client)
+            return sim.render()[r.top:r.bottom, r.left:r.right].copy()
     elif args.replay:
         from tidecaller.core.input import RecordingInput
 
@@ -91,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             return m
 
         overlay_factory = None
+        reel_grabber = None  # use "Load recording..." in the calibrate dialog instead
     else:
         from tidecaller.core.input import DirectInput
         from tidecaller.gui.overlay import AreaOverlay
@@ -103,7 +108,17 @@ def main(argv: list[str] | None = None) -> int:
             client = find_roblox_client_rect()
             return None if client is None else AreaOverlay(cfg.regions, client, on_close)
 
-    win = MainWindow(cfg, args.config, factory, overlay_factory, notifier_factory)
+        grab_src = {}
+
+        def reel_grabber():
+            client = find_roblox_client_rect()
+            if client is None:
+                return None
+            if "src" not in grab_src:
+                grab_src["src"] = make_source("mss")  # separate from the macro's capture; mss is thread-agnostic
+            return grab_src["src"].grab(cfg.regions.fish_bar.to_rect(client))
+
+    win = MainWindow(cfg, args.config, factory, overlay_factory, notifier_factory, reel_grabber)
     win.show()
     register_hotkeys(win, cfg)
     return app.exec()

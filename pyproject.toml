@@ -1,6 +1,6 @@
 [project]
 name = "tidecaller"
-version = "0.1.0"
+version = "0.1.1"
 description = "External computer-vision fishing macro for Roblox Fisch"
 requires-python = ">=3.12"
 
