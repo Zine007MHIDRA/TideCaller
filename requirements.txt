@@ -1,0 +1,12 @@
+numpy
+opencv-python
+mss
+dxcam
+pydirectinput
+pydantic>=2
+PySide6
+keyboard
+requests
+pywin32
+onnxruntime
+pytest
