@@ -22,7 +22,7 @@ def find_circles(img: np.ndarray, cfg: ShakeSettings) -> list[tuple[int, int]]:
     for c in contours:
         area = cv2.contourArea(c)
         per = cv2.arcLength(c, True)
-        if area < cfg.min_button_area or per == 0:
+        if area < cfg.min_button_area or area > cfg.max_button_area or per == 0:
             continue
         if 4 * math.pi * area / (per * per) < cfg.circularity:
             continue

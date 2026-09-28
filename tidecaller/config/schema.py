@@ -26,13 +26,14 @@ class CastStyle(str, Enum):
 
 
 class ReleaseStyle(str, Enum):
-    IDIOT_PROOF = "idiot_proof"  # threshold on the meter, timeout fallback
-    THRESHOLD = "threshold"      # pure threshold, no fallback
+    IDIOT_PROOF = "idiot_proof"  # release when the meter turns green, timeout fallback
+    THRESHOLD = "threshold"      # release only on green (long safety cap)
     TIMED = "timed"              # fixed hold duration
-    PREDICTIVE = "predictive"    # velocity + latency compensation (perfect casts)
+    PREDICTIVE = "predictive"    # learned time-to-full minus input latency, green as fallback
 
 
 class ShakeStyle(str, Enum):
+    NONE = "none"  # rod/bait skips the shake: just wait for the reel
     NAVIGATION = "navigation"
     CIRCLE = "circle"
     PIXEL = "pixel"
@@ -57,11 +58,15 @@ class Hotkeys(BaseModel):
 
 class Regions(BaseModel):
     """Stored as fractions of the Roblox client rect, so they survive resolution changes."""
-    fish_bar: Region = Region(0.28, 0.83, 0.44, 0.035)
-    reel_progress: Region = Region(0.28, 0.875, 0.44, 0.02)
+    # defaults measured on a real 1920x1040 Fisch window
+    fish_bar: Region = Region(0.29, 0.862, 0.42, 0.032)
+    reel_progress: Region = Region(0.30, 0.927, 0.40, 0.014)
     shake: Region = Region(0.2, 0.15, 0.6, 0.6)
-    cast_meter: Region = Region(0.47, 0.35, 0.06, 0.3)
+    # the meter sits right of the character; searched for, so this box can be generous
+    cast_meter: Region = Region(0.45, 0.25, 0.25, 0.5)
     hotbar: Region = Region(0.3, 0.92, 0.4, 0.07)
+    # "Current Bait ... Power" block that only shows while the rod is held
+    rod_info: Region = Region(0.35, 0.855, 0.30, 0.065)
 
 
 class MainSettings(BaseModel):
@@ -89,7 +94,12 @@ class ShakeSettings(BaseModel):
     navigation_key: str = "\\"
     click_interval_ms: int = Field(60, ge=10, le=1000)
     timeout_s: float = Field(12.0, ge=1, le=60)
+    # rods whose lure stat is at/above this skip the shake entirely (e.g. Masterline); 0 disables
+    skip_shake_lure_pct: float = Field(95.0, ge=0, le=5000)
+    # always watch only for the reel this long first, so instant bites never get stray clicks
+    instant_grace_s: float = Field(1.0, ge=0, le=10)
     min_button_area: int = 400
+    max_button_area: int = 40000
     circularity: float = Field(0.7, ge=0.3, le=1.0)
 
 
@@ -140,7 +150,11 @@ class DiscordSettings(BaseModel):
     attach_screenshot: bool = True
 
 
+CONFIG_VERSION = 2  # v2: region defaults re-measured on the real game UI
+
+
 class Config(BaseModel):
+    version: int = CONFIG_VERSION
     main: MainSettings = MainSettings()
     cast: CastSettings = CastSettings()
     shake: ShakeSettings = ShakeSettings()
@@ -161,7 +175,13 @@ class Config(BaseModel):
     @classmethod
     def load(cls, path: Path) -> "Config":
         if path.exists():
-            return cls.model_validate_json(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("version", 1) < 2:
+                data.pop("regions", None)  # v1 boxes were guesses; use the measured defaults
+            data["version"] = CONFIG_VERSION
+            cfg = cls.model_validate(data)
+            cfg.save(path)
+            return cfg
         cfg = cls()
         cfg.save(path)
         return cfg

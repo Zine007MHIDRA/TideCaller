@@ -27,7 +27,7 @@ W, H = 1280, 720
 class SimParams:
     meter_fill_s: float = 1.1
     bite_delay_s: float = 0.6
-    shakes_needed: int = 3
+    shakes_needed: int = 3        # 0 = instant bite straight into the reel (high-lure rods)
     bar_width_frac: float = 0.28
     bar_accel: float = 2.6        # bar-widths/s^2 while holding (in fractions of track)
     bar_gravity: float = 2.4
@@ -119,8 +119,11 @@ class FischSim:
                 self.fill = min(1.0, self.fill + dt / self.p.meter_fill_s)
             elif self.state == "waiting" and now - self.t_state > self.p.bite_delay_s:
                 self.shakes_left = self.p.shakes_needed
-                self._spawn_button()
-                self._goto("shake")
+                if self.shakes_left <= 0:
+                    self._start_reel()
+                else:
+                    self._spawn_button()
+                    self._goto("shake")
             elif self.state == "reel":
                 self._tick_reel(dt)
             elif self.state in ("caught", "escaped") and now - self.t_state > 0.6:
@@ -152,7 +155,11 @@ class FischSim:
         with self.lock:
             img = np.full((H, W, 3), (120, 90, 40), np.uint8)  # "ocean"
             img[: H // 3] = (200, 160, 110)                     # "sky"
-            self._draw_hotbar(img)
+            img[int(H * 0.8):] = (185, 190, 235)                # "sand" behind the hotbar, like the real dock
+            if self.state not in ("reel", "caught", "escaped"):  # hidden while reeling / during the catch popup
+                self._draw_hotbar(img)
+                if self.equipped_slot == 1:
+                    self._draw_rod_info(img)
             if self.state == "casting":
                 self._draw_meter(img)
             if self.state == "shake" and self.button:
@@ -172,12 +179,27 @@ class FischSim:
             if self.equipped_slot == i + 1:
                 cv2.rectangle(img, (x0, r.top), (int(x0 + sw) - 1, r.bottom - 1), (255, 255, 255), 3)
 
+    def _draw_rod_info(self, img: np.ndarray) -> None:
+        """The "Power" bar that only exists while the rod is held (purple fill + navy remainder)."""
+        r = self.regions.rod_info.to_rect(self.client)
+        y0, y1 = r.top + r.height // 2 - 4, r.top + r.height // 2 + 4
+        x0, x1 = r.left + r.width // 20, r.right - r.width // 20
+        split = int(x0 + 0.8 * (x1 - x0))
+        cv2.rectangle(img, (x0, y0), (split, y1), (230, 90, 140), -1)
+        cv2.rectangle(img, (split, y0), (x1, y1), (90, 30, 20), -1)
+
     def _draw_meter(self, img: np.ndarray) -> None:
+        """Thin dark-outlined bar right of the player: fills white, turns fully green at max power."""
         r = self.regions.cast_meter.to_rect(self.client)
-        cv2.rectangle(img, (r.left, r.top), (r.right - 1, r.bottom - 1), (30, 30, 30), -1)
-        top = int(r.bottom - self.fill * r.height)
-        hue_bgr = (40, 220, 60) if self.fill < 0.9 else (40, 200, 240)
-        cv2.rectangle(img, (r.left, top), (r.right - 1, r.bottom - 1), hue_bgr, -1)
+        cx, w = r.left + int(r.width * 0.55), max(6, r.width // 30)
+        top, bottom = r.top + int(r.height * 0.2), r.top + int(r.height * 0.8)
+        cv2.rectangle(img, (cx - w - 2, top - 2), (cx + w + 2, bottom + 2), (15, 15, 15), -1)
+        cv2.rectangle(img, (cx - w, top), (cx + w, bottom), (120, 115, 110), -1)
+        if self.fill >= 0.98:
+            cv2.rectangle(img, (cx - w, top), (cx + w, bottom), (60, 220, 70), -1)
+        else:
+            fy = int(bottom - self.fill * (bottom - top))
+            cv2.rectangle(img, (cx - w, fy), (cx + w, bottom), (250, 250, 250), -1)
 
     def _draw_reel(self, img: np.ndarray) -> None:
         r = self.regions.fish_bar.to_rect(self.client)

@@ -1,73 +1,85 @@
-"""Casting: hold the mouse while the power meter fills, release according to a strategy."""
+"""Casting: hold the mouse while the power meter fills, release according to a strategy.
+
+The real meter (measured on gameplay footage) is a thin, dark-outlined vertical bar right of the character that
+fills WHITE from the bottom and turns entirely GREEN at full power, which is the "PERFECT!" window (~200 ms).
+A tall solid green column is unmistakable even with bright auras around the player, so release keys off that
+instead of trying to measure the white fill against busy backgrounds.
+"""
 from __future__ import annotations
 
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 from tidecaller.config.schema import CastSettings, CastStyle, ReleaseStyle
 
+GREEN_MIN_FRAC = 0.18  # of the search box height; the full meter is ~0.6 of the default box
 
-def read_meter(img: np.ndarray) -> float | None:
-    """Fill fraction (0..1) of the vertical cast meter, measured from the bottom. None if no meter is visible.
 
-    The meter fill is a saturated, bright color (green -> yellow -> red depending on power); the empty part is a
-    dark translucent track. We look at the central columns and find the topmost filled row.
-    """
-    h, w = img.shape[:2]
-    cols = img[:, max(0, w // 2 - 2): w // 2 + 3]
-    hsv = cv2.cvtColor(cols, cv2.COLOR_BGR2HSV)
-    filled = ((hsv[:, :, 1] > 90) & (hsv[:, :, 2] > 120)).mean(axis=1) > 0.5
-    if filled.sum() < 2:
-        return None
-    return float(h - np.flatnonzero(filled)[0]) / h
+def _longest_run(col: np.ndarray, max_gap: int = 3) -> int:
+    best = run = gap = 0
+    for v in col:
+        if v:
+            run += gap + 1 if run else 1
+            gap = 0
+            best = max(best, run)
+        elif run:
+            gap += 1
+            if gap > max_gap:
+                run = gap = 0
+    return best
+
+
+def meter_is_full(img: np.ndarray) -> bool:
+    """True while the cast meter is a solid green column (full power / perfect window)."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    green = (h > 35) & (h < 90) & (s > 80) & (v > 110)
+    counts = green.sum(axis=0)
+    if counts.max() < GREEN_MIN_FRAC * img.shape[0]:
+        return False
+    for x in np.argsort(counts)[::-1][:5]:
+        if _longest_run(green[:, x]) >= GREEN_MIN_FRAC * img.shape[0]:
+            return True
+    return False
 
 
 @dataclass
 class ReleaseDecider:
-    """Stateful per-cast decision: feed it (t, fill) samples, it says when to let go."""
+    """Stateful per-cast decision: feed it (t, full) samples, it says when to let go."""
     cfg: CastSettings
     t0: float
     latency_s: float = 0.035
-    _hist: deque = field(default_factory=lambda: deque(maxlen=6))
+    time_to_full_s: float | None = None  # learned by FullTimeEstimator, used by the predictive style
 
     @property
     def style(self) -> ReleaseStyle:
-        # perfect casts always need the predictive release, regardless of the chosen release style
-        return ReleaseStyle.PREDICTIVE if self.cfg.style == CastStyle.PERFECT else self.cfg.release
+        # perfect casts need a timing-aware release regardless of the chosen style
+        if self.cfg.style == CastStyle.PERFECT and self.cfg.release == ReleaseStyle.TIMED:
+            return ReleaseStyle.IDIOT_PROOF
+        return self.cfg.release
 
-    def should_release(self, t: float, fill: float | None) -> bool:
+    def should_release(self, t: float, full: bool) -> bool:
         elapsed = t - self.t0
         style = self.style
         if style == ReleaseStyle.TIMED:
             return elapsed * 1000 >= self.cfg.timed_hold_ms
-        if fill is not None:
-            self._hist.append((t, fill))
-        if style == ReleaseStyle.PREDICTIVE:
-            if len(self._hist) >= 3:
-                (ta, fa), (tb, fb) = self._hist[0], self._hist[-1]
-                v = (fb - fa) / (tb - ta) if tb > ta else 0.0
-                # release so that the meter reaches the threshold when the input actually lands
-                if fill is not None and v > 0 and fill + v * self.latency_s >= self.cfg.fill_threshold:
-                    return True
-        elif fill is not None and fill >= self.cfg.fill_threshold:
+        if full:
             return True
-        if style == ReleaseStyle.THRESHOLD:
-            return False
-        return elapsed * 1000 >= self.cfg.timeout_ms  # idiot-proof / predictive fallback
+        if style == ReleaseStyle.PREDICTIVE and self.time_to_full_s is not None:
+            if elapsed >= self.time_to_full_s - self.latency_s:
+                return True
+        cap = self.cfg.timeout_ms * (3 if style == ReleaseStyle.THRESHOLD else 1)
+        return elapsed * 1000 >= cap
 
 
-class LatencyEstimator:
-    """Learns the real input latency from perfect-cast outcomes (EMA)."""
+class FullTimeEstimator:
+    """Learns how long the meter takes to fill (EMA over casts where green was actually seen)."""
 
-    def __init__(self, seed_ms: float, alpha: float = 0.2) -> None:
-        self.ms, self.alpha = seed_ms, alpha
+    def __init__(self, alpha: float = 0.3) -> None:
+        self.value: float | None = None
+        self.alpha = alpha
 
-    def update(self, overshoot: float, velocity: float) -> None:
-        """overshoot = final fill - target (negative if short); velocity in fill/s."""
-        if velocity <= 0:
-            return
-        observed = self.ms + overshoot / velocity * 1000
-        self.ms = max(0.0, (1 - self.alpha) * self.ms + self.alpha * observed)
+    def update(self, seconds: float) -> None:
+        self.value = seconds if self.value is None else (1 - self.alpha) * self.value + self.alpha * seconds

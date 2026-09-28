@@ -18,9 +18,9 @@ from tidecaller.config.schema import Config, ShakeStyle
 from tidecaller.core.capture import FrameSource, RateLimiter
 from tidecaller.core.input import Input, jitter
 from tidecaller.core.regions import Rect, Region
-from tidecaller.modules.cast import LatencyEstimator, ReleaseDecider, read_meter
+from tidecaller.modules.cast import FullTimeEstimator, ReleaseDecider, meter_is_full
 from tidecaller.modules.reel import ReelController, TrackResult, make_tracker
-from tidecaller.modules.rod import slot_is_selected
+from tidecaller.modules.rod import rod_held
 from tidecaller.modules.shake import find_circles, find_pixel
 from tidecaller.modules.totem import ConsumableScheduler
 
@@ -81,7 +81,7 @@ class Macro:
         self.notifier = notifier
         self.phase = Phase.IDLE
         self.stats = Stats(started=clock())
-        self.latency = LatencyEstimator(cfg.cast.input_latency_ms)
+        self.full_time = FullTimeEstimator()
         self.consumables = ConsumableScheduler(cfg.totem, clock())
         self._stop = threading.Event()
         self._paused = threading.Event()
@@ -171,39 +171,71 @@ class Macro:
                 pass  # notifications must never break the loop
 
     # ---------------------------------------------------------------- phases
+    def _rod_held(self) -> bool | None:
+        img, _ = self._grab(self.cfg.regions.rod_info)
+        return None if img is None else rod_held(img)
+
+    def _wait_rod_ready(self, timeout_s: float) -> bool:
+        """Wait for the rod's Power bar: it only comes back once catch popups/animations are done."""
+        end = self.clock() + timeout_s
+        while self.clock() < end:
+            if self._rod_held():
+                return True
+            self._sleep(0.05)
+        return False
+
     def _equip(self) -> Phase:
+        """Press the rod slot only when we can SEE the rod isn't held. Pressing it while held unequips the rod,
+        so this never presses twice in a row: if the check still fails afterwards we cast anyway and let the
+        cast/shake timeouts decide."""
         m = self.cfg.main
-        if m.auto_select_rod:
-            img, _ = self._grab(self.cfg.regions.hotbar)
-            if img is not None and not slot_is_selected(img, m.rod_slot):
-                self.inp.tap(str(m.rod_slot))
-                self._sleep(jitter(300))
+        # give the UI a moment first: right after a catch the hotbar can still be hidden
+        if m.auto_select_rod and not self._wait_rod_ready(1.5):
+            self.inp.tap(str(m.rod_slot))
+            self._wait_rod_ready(1.5)
         return Phase.CAST
 
     def _cast(self) -> Phase:
         c = self.cfg.cast
-        decider = ReleaseDecider(c, self.clock(), latency_s=self.latency.ms / 1000)
+        decider = ReleaseDecider(c, self.clock(), latency_s=c.input_latency_ms / 1000,
+                                 time_to_full_s=self.full_time.value)
         limiter = RateLimiter(self.cfg.fish.scan_fps)
         # center the cursor in the game area so the click lands on the world, not UI
         client = self._rect(Region(0, 0, 1, 1))
         self.inp.move(client.left + client.width // 2, client.top + client.height // 2)
         self.inp.mouse_down()
-        fill = None
         while True:
             self._checkpoint()
             img, _ = self._grab(self.cfg.regions.cast_meter)
-            fill = read_meter(img) if img is not None else None
-            if decider.should_release(self.clock(), fill):
+            full = img is not None and meter_is_full(img)
+            now = self.clock()
+            if full:
+                self.full_time.update(now - decider.t0)
+            if decider.should_release(now, full):
                 break
             limiter.wait()
         self.inp.mouse_up()
         self._sleep(c.post_cast_delay_ms / 1000)
         return Phase.SHAKE
 
+    def skips_shake(self) -> bool:
+        """High-lure rods (e.g. Masterline) and instant baits go straight from cast to reel."""
+        s = self.cfg.shake
+        if s.style == ShakeStyle.NONE:
+            return True
+        if s.skip_shake_lure_pct <= 0:
+            return False
+        from tidecaller.config.rod_presets import load_stats
+
+        stats = load_stats().get(self.cfg.fish.rod)
+        return bool(stats and stats.lure_pct is not None and stats.lure_pct >= s.skip_shake_lure_pct)
+
     def _shake(self) -> Phase:
         s = self.cfg.shake
         tracker = self._tracker()
-        deadline = self.clock() + s.timeout_s
+        start = self.clock()
+        deadline = start + s.timeout_s
+        skip = self.skips_shake()
         nav_on = False
         while self.clock() < deadline:
             self._checkpoint()
@@ -212,6 +244,9 @@ class Macro:
                 if nav_on:
                     self.inp.tap(s.navigation_key)
                 return Phase.REEL
+            if skip or self.clock() - start < s.instant_grace_s:
+                self._sleep(0.03)  # only watch for the reel; never click
+                continue
             if s.style == ShakeStyle.NAVIGATION:
                 if not nav_on:
                     self.inp.tap(s.navigation_key)
@@ -278,6 +313,7 @@ class Macro:
             for _ in range(2):  # open+close the backpack to dismiss the catch popup
                 self.inp.tap(self.cfg.fish.bag_key)
                 self._sleep(jitter(120))
+        self._wait_rod_ready(3.0)  # casting during the catch popup is ignored by the game
         self.on_catch(self.stats, ok)
         if self.cfg.discord.on_catch:
             self._notify("catch", ok=ok)
@@ -307,11 +343,8 @@ class Macro:
     def _recover(self) -> Phase:
         self.stats.recoveries += 1
         self.inp.release_all()
-        slot = str(self.cfg.main.rod_slot)
-        self.inp.tap(slot)  # unequip
-        self._sleep(jitter(400))
-        self.inp.tap(slot)  # re-equip
-        self._sleep(jitter(600))
+        # no blind key presses here: EQUIP re-checks the rod, and the next cast's click reels in any stuck line
+        self._sleep(jitter(800))
         if self.cfg.discord.on_error:
             self._notify("stuck", phase=self.phase.value)
         return Phase.EQUIP

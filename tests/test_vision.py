@@ -1,11 +1,14 @@
+from pathlib import Path
+
+import cv2
 import numpy as np
 import pytest
 
 from tidecaller.config.schema import CastSettings, CastStyle, Config, ReleaseStyle, ShakeSettings
 from tidecaller.core.regions import Rect, Region
-from tidecaller.modules.cast import LatencyEstimator, ReleaseDecider, read_meter
+from tidecaller.modules.cast import ReleaseDecider, meter_is_full
 from tidecaller.modules.reel import ReelController, TrackResult, make_tracker
-from tidecaller.modules.rod import slot_is_selected
+from tidecaller.modules.rod import power_bar_run, rod_held
 from tidecaller.modules.shake import find_circles, find_pixel
 from tidecaller.sim.fisch_sim import FischSim, SimInput
 
@@ -50,42 +53,56 @@ def test_controller_centered_is_half_duty():
     assert 45 <= holds <= 55
 
 
-def meter(fill, h=200, w=30):
-    img = np.full((h, w, 3), 30, np.uint8)
-    img[int(h - fill * h):, :] = (40, 220, 60)
+FIX = Path(__file__).parent / "fixtures"
+
+
+def fixture(name):
+    img = cv2.imread(str(FIX / f"{name}.png"))
+    assert img is not None, name
     return img
 
 
-@pytest.mark.parametrize("fill", [0.1, 0.5, 0.95])
-def test_read_meter(fill):
-    assert read_meter(meter(fill)) == pytest.approx(fill, abs=0.02)
+# --- real-game frames (1920x1040 recording) --------------------------------------------------------
+def test_real_meter_full_detected():
+    assert meter_is_full(fixture("meter_full"))
 
 
-def test_read_meter_absent():
-    assert read_meter(np.full((200, 30, 3), 30, np.uint8)) is None
+@pytest.mark.parametrize("name", ["meter_filling", "meter_none_aura", "meter_none_idle"])
+def test_real_meter_not_full(name):
+    assert not meter_is_full(fixture(name))
 
 
-def test_idiot_proof_release_threshold_and_timeout():
-    cfg = CastSettings(release=ReleaseStyle.IDIOT_PROOF, fill_threshold=0.9, timeout_ms=1000)
+def test_real_rod_held():
+    assert rod_held(fixture("rodinfo_held"))
+
+
+@pytest.mark.parametrize("name", ["rodinfo_not_held", "rodinfo_reeling"])
+def test_real_rod_not_held(name):
+    assert not rod_held(fixture(name))
+    assert power_bar_run(fixture(name)) < 0.2
+
+
+# --- release strategies ----------------------------------------------------------------------------
+def test_idiot_proof_releases_on_green_or_timeout():
+    cfg = CastSettings(release=ReleaseStyle.IDIOT_PROOF, timeout_ms=1000)
     d = ReleaseDecider(cfg, t0=0.0)
-    assert not d.should_release(0.2, 0.5)
-    assert d.should_release(0.3, 0.92)
-    d2 = ReleaseDecider(cfg, t0=0.0)
-    assert d2.should_release(1.1, None)  # meter never seen -> fallback
+    assert not d.should_release(0.5, False)
+    assert d.should_release(0.6, True)
+    assert ReleaseDecider(cfg, t0=0.0).should_release(1.05, False)  # meter never seen -> fallback
 
 
-def test_predictive_release_leads_by_latency():
-    cfg = CastSettings(style=CastStyle.PERFECT, fill_threshold=0.95)
-    d = ReleaseDecider(cfg, t0=0.0, latency_s=0.1)
-    # meter fills at 1.0/s -> should release ~0.1 s before hitting 0.95
-    fired = next(t for t in np.arange(0.0, 1.0, 0.01) if d.should_release(t, t))
-    assert 0.83 <= fired <= 0.87
+def test_threshold_waits_longer_than_timeout():
+    cfg = CastSettings(release=ReleaseStyle.THRESHOLD, timeout_ms=1000)
+    d = ReleaseDecider(cfg, t0=0.0)
+    assert not d.should_release(1.5, False)
+    assert d.should_release(1.5, True)
 
 
-def test_latency_estimator_moves_toward_observed():
-    est = LatencyEstimator(30)
-    est.update(overshoot=0.02, velocity=1.0)  # released 20 ms too late -> real latency higher
-    assert est.ms > 30
+def test_predictive_uses_learned_time_to_full():
+    cfg = CastSettings(style=CastStyle.PERFECT, release=ReleaseStyle.PREDICTIVE)
+    d = ReleaseDecider(cfg, t0=0.0, latency_s=0.05, time_to_full_s=0.8)
+    assert not d.should_release(0.70, False)
+    assert d.should_release(0.76, False)
 
 
 def test_shake_circle_found_and_square_rejected():
@@ -100,14 +117,13 @@ def test_shake_circle_found_and_square_rejected():
     assert find_pixel(img, cfg) is not None
 
 
-def test_hotbar_slot_detection_on_sim():
+def test_rod_held_on_sim_power_bar():
     sim = FischSim()
+    crop = lambda: (lambda f, r: f[r.top:r.bottom, r.left:r.right])(  # noqa: E731
+        sim.render(), sim.regions.rod_info.to_rect(sim.client))
+    assert not rod_held(crop())
     SimInput(sim).tap("1")
-    frame = sim.render()
-    hb = sim.regions.hotbar.to_rect(sim.client)
-    crop = frame[hb.top:hb.bottom, hb.left:hb.right]
-    assert slot_is_selected(crop, 1)
-    assert not slot_is_selected(crop, 2)
+    assert rod_held(crop())
 
 
 def test_region_roundtrip():

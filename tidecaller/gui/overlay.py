@@ -16,6 +16,7 @@ COLORS = {
     "shake": QColor(255, 80, 200),
     "cast_meter": QColor(255, 210, 60),
     "hotbar": QColor(0, 230, 230),
+    "rod_info": QColor(170, 110, 255),
 }
 HANDLE = 12
 
